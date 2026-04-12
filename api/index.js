@@ -1,59 +1,72 @@
 import express from 'express';
-import { YoutubeTranscript } from 'youtube-transcript';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
+const { YoutubeTranscript } = require('youtube-transcript');
+const { getSubtitles } = require('youtube-captions-scraper');
 
 const app = express();
 
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+];
+
 /* ── Transcript API ─────────────────────────────────────── */
 app.get('/api/transcript', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ success: false, error: 'URL required' });
+
+  const videoId = extractVideoId(url);
+  if (!videoId) return res.status(400).json({ success: false, error: 'Invalid URL' });
+
+  const randomUA = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+  
+  // 1. ALWAYS try to fetch metadata first (usually works even if blocked)
+  let [title, author] = ['', ''];
   try {
-    const { url } = req.query;
-    if (!url) {
-      return res.status(400).json({ success: false, error: 'YouTube URL is required' });
-    }
+    const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
+    const info = await oembedRes.json();
+    title = info.title;
+    author = info.author_name;
+  } catch (_) {}
 
-    const videoId = extractVideoId(url);
-    if (!videoId) {
-      return res.status(400).json({ success: false, error: 'Invalid YouTube URL' });
-    }
-
-    // Fetch transcript
-    // We use the static method directly from the class
-    const transcript = await YoutubeTranscript.fetchTranscript(videoId);
-
-    // Fetch video metadata via oEmbed
-    let title = '', author = '';
+  // 2. Try fetching transcript (Method 1)
+  try {
+    console.log(`[Method 1] Fetching for ${videoId}`);
+    const transcript = await YoutubeTranscript.fetchTranscript(videoId, {
+      config: { headers: { 'User-Agent': randomUA } }
+    });
+    return res.json({ success: true, transcript, title, author, videoId });
+  } catch (err1) {
+    console.warn(`[Method 1] Failed: ${err1.message}`);
+    
+    // 3. Fallback (Method 2)
     try {
-      const canonical = `https://www.youtube.com/watch?v=${videoId}`;
-      const oembedRes = await fetch(
-        `https://www.youtube.com/oembed?url=${encodeURIComponent(canonical)}&format=json`
-      );
-      const info = await oembedRes.json();
-      title = info.title || '';
-      author = info.author_name || '';
-    } catch (_) { /* metadata is optional */ }
-
-    res.json({ success: true, transcript, title, author, videoId });
-  } catch (err) {
-    const msg = err.message || 'Failed to fetch transcript. The video may not have captions.';
-    res.status(400).json({ success: false, error: msg });
+      console.log(`[Method 2] Fallback for ${videoId}`);
+      const transcript = await getSubtitles({ videoID: videoId, lang: 'en' });
+      const normalized = transcript.map(t => ({
+        text: t.text,
+        offset: parseFloat(t.start) * 1000,
+        duration: parseFloat(t.dur) * 1000
+      }));
+      return res.json({ success: true, transcript: normalized, title, author, videoId });
+    } catch (err2) {
+      console.error(`[All Methods] Failed for ${videoId}`);
+      // Return partial success (metadata) but success:false for transcript
+      return res.status(200).json({ 
+        success: false, 
+        videoId, title, author,
+        error: 'YouTube blocked the transcript request. Try again later or use the local version.' 
+      });
+    }
   }
 });
 
-/* ── Helpers ─────────────────────────────────────────────── */
 function extractVideoId(url) {
-  const patterns = [
-    /(?:youtube\.com\/watch\?.*v=)([a-zA-Z0-9_-]{11})/,
-    /(?:youtu\.be\/)([a-zA-Z0-9_-]{11})/,
-    /(?:youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
-    /(?:youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
-    /^([a-zA-Z0-9_-]{11})$/,
-  ];
-  for (const p of patterns) {
-    const m = url.trim().match(p);
-    if (m) return m[1];
-  }
-  return null;
+  const m = url.match(/(?:youtube\.com\/watch\?.*v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : (url.length === 11 ? url : null);
 }
 
-// Export the app for Vercel
 export default app;
