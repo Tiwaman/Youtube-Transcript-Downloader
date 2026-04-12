@@ -62,71 +62,46 @@
     setLoading(true);
 
     try {
-      // 1. TRY SERVER EXTRACTION
       const res = await fetch(`/api/transcript?url=${encodeURIComponent(url)}`);
+      
       const contentType = res.headers.get("content-type");
-      
-      if (res.ok && contentType && contentType.includes("application/json")) {
-        const data = await res.json();
-        if (data.success) {
-          applyData(data);
-          return;
-        }
-        // If meta exists, show it even if transcript failed
-        if (data.videoId) showMeta(data);
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error('Server returned an unexpected error. This usually happens when YouTube blocks the request.');
       }
+
+      const data = await res.json();
       
-      throw new Error('Server extraction blocked by YouTube.');
+      // We always try to show video meta if returned
+      if (data.videoId) {
+        thumbnail.src = `https://img.youtube.com/vi/${data.videoId}/hqdefault.jpg`;
+        videoTitle.textContent = data.title || 'Untitled Video';
+        videoChannel.textContent = data.author || '';
+        videoPreview.style.display = 'flex';
+      }
+
+      if (!data.success) {
+        // Show specific error from backend
+        throw new Error(data.error || 'Transcript extraction failed.');
+      }
+
+      // ON SUCCESS
+      transcriptData = data.transcript;
+      currentVideoId = data.videoId;
+      currentTitle   = data.title || 'transcript';
+
+      renderTranscript(transcriptData);
+      updateStats(transcriptData);
+      toolbar.style.display = 'flex';
+      container.style.display = 'block';
+      stats.style.display = 'grid';
+      searchInput.value = '';
 
     } catch (err) {
-      console.warn('Server Fetch Failed. Attempting Client-Side Fallback...');
-      showError('Initial attempt restricted. Retrying with local bypass...');
-      
-      // 2. CLIENT-SIDE FALLBACK (Phase 2 Stealth)
-      // This is less likely to be blocked because it uses the user's IP
-      try {
-        const videoId = extractVideoId(url);
-        if (!videoId) throw new Error('Invalid URL');
-        
-        // Fetch Metadata via CORS Proxy
-        const metaUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
-        const proxiedMeta = `https://api.allorigins.win/get?url=${encodeURIComponent(metaUrl)}`;
-        const metaRes = await fetch(proxiedMeta);
-        const metaWrap = await metaRes.json();
-        const meta = JSON.parse(metaWrap.contents);
-        
-        showMeta({ videoId, title: meta.title, author: meta.author_name });
-        
-        throw new Error('Bypass successful, but YouTube captions require a secure session. Please try the local server.');
-      } catch (fallbackErr) {
-        showError('YouTube is currently blocking access from this environment. Please try again in 5 minutes.');
-      }
+      showError(err.message);
+      // We don't call hideResults() here so we keep the thumbnail/preview if it loaded
     } finally {
       setLoading(false);
     }
-  }
-
-  function applyData(data) {
-    transcriptData = data.transcript;
-    currentVideoId = data.videoId;
-    currentTitle   = data.title || 'transcript';
-
-    showMeta(data);
-    renderTranscript(transcriptData);
-    updateStats(transcriptData);
-    
-    toolbar.style.display = 'flex';
-    container.style.display = 'block';
-    stats.style.display = 'grid';
-    searchInput.value = '';
-    hideError();
-  }
-
-  function showMeta(data) {
-    thumbnail.src = `https://img.youtube.com/vi/${data.videoId}/hqdefault.jpg`;
-    videoTitle.textContent = data.title || 'Untitled Video';
-    videoChannel.textContent = data.author || '';
-    videoPreview.style.display = 'flex';
   }
 
   /* ── Helpers ───────────────────────────────────────────── */
@@ -244,10 +219,6 @@
   function decodeHTML(str) { const el = document.createElement('textarea'); el.innerHTML = str; return el.value; }
   function escapeRegex(str) { return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
   function isYouTubeUrl(str) { return /youtube\.com|youtu\.be/i.test(str); }
-  function extractVideoId(url) {
-    const m = url.match(/(?:youtube\.com\/watch\?.*v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
-    return m ? m[1] : (url.length === 11 ? url : null);
-  }
   
   function setLoading(on) {
     fetchBtn.classList.toggle('loading', on);
