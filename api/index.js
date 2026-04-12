@@ -7,10 +7,23 @@ const { getSubtitles } = require('youtube-captions-scraper');
 
 const app = express();
 
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+const HEADER_POOL = [
+  {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.youtube.com/',
+    'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"'
+  },
+  {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-GB,en;q=0.8',
+    'Referer': 'https://www.google.com/',
+    'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="120", "Chromium";v="120"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"macOS"'
+  }
 ];
 
 /* ── Transcript API ─────────────────────────────────────── */
@@ -21,7 +34,7 @@ app.get('/api/transcript', async (req, res) => {
   const videoId = extractVideoId(url);
   if (!videoId) return res.status(400).json({ success: false, error: 'Invalid URL' });
 
-  const randomUA = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+  const headers = HEADER_POOL[Math.floor(Math.random() * HEADER_POOL.length)];
   
   // 1. ALWAYS try to fetch metadata first (usually works even if blocked)
   let [title, author] = ['', ''];
@@ -36,7 +49,7 @@ app.get('/api/transcript', async (req, res) => {
   try {
     console.log(`[Method 1] Fetching for ${videoId}`);
     const transcript = await YoutubeTranscript.fetchTranscript(videoId, {
-      config: { headers: { 'User-Agent': randomUA } }
+      config: { headers }
     });
     return res.json({ success: true, transcript, title, author, videoId });
   } catch (err1) {
