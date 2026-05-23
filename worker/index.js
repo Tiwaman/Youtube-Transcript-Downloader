@@ -1,14 +1,8 @@
 /* ═══════════════════════════════════════════════════════════
    TranscriptGrab — Cloudflare Worker API
-   Fetches YouTube transcripts via direct page scraping.
+   Uses Supadata API for reliable transcript extraction.
    Deploy: npx wrangler deploy
    ═══════════════════════════════════════════════════════════ */
-
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-];
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -17,7 +11,7 @@ const CORS_HEADERS = {
 };
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     // Handle CORS preflight
@@ -27,14 +21,14 @@ export default {
 
     // Route: /api/transcript?url=...
     if (url.pathname === '/api/transcript') {
-      return handleTranscript(url.searchParams.get('url'));
+      return handleTranscript(url.searchParams.get('url'), env);
     }
 
     return jsonResponse({ error: 'Not found' }, 404);
   }
 };
 
-async function handleTranscript(videoUrl) {
+async function handleTranscript(videoUrl, env) {
   if (!videoUrl) {
     return jsonResponse({ success: false, error: 'URL required' }, 400);
   }
@@ -44,129 +38,87 @@ async function handleTranscript(videoUrl) {
     return jsonResponse({ success: false, error: 'Invalid YouTube URL.' }, 400);
   }
 
-  // Fetch metadata
-  let [title, author] = ['Untitled Video', 'Unknown Channel'];
+  const apiKey = env.SUPADATA_API_KEY;
+  if (!apiKey) {
+    return jsonResponse({ success: false, error: 'Server configuration error.' }, 500);
+  }
+
+  // Fetch transcript from Supadata
   try {
-    const oembedRes = await fetch(
-      `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
-    );
-    if (oembedRes.ok) {
-      const info = await oembedRes.json();
-      title = info.title || title;
-      author = info.author_name || author;
+    const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const res = await fetch(`https://api.supadata.ai/v1/youtube/transcript?url=${encodeURIComponent(ytUrl)}&text=false&lang=en`, {
+      headers: {
+        'x-api-key': apiKey,
+      },
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      const errMsg = errData?.message || errData?.error || '';
+
+      if (res.status === 404 || errMsg.includes('not found') || errMsg.includes('unavailable')) {
+        return jsonResponse({
+          success: false,
+          transcript: [],
+          videoId,
+          title: '',
+          author: '',
+          error: 'No transcript available for this video.',
+        });
+      }
+      if (res.status === 429) {
+        return jsonResponse({
+          success: false,
+          transcript: [],
+          videoId,
+          title: '',
+          author: '',
+          error: 'Rate limit reached. Please try again later.',
+        });
+      }
+      throw new Error(errMsg || `Supadata returned ${res.status}`);
     }
-  } catch (_) {}
 
-  // Try fetching transcript
-  let transcript = null;
-  let errorMsg = '';
+    const data = await res.json();
+    const transcript = (data.content || []).map(item => ({
+      text: item.text,
+      offset: item.offset || 0,
+      duration: item.duration || 0,
+      lang: item.lang || data.lang || 'en',
+    }));
 
-  try {
-    transcript = await fetchTranscriptDirect(videoId);
+    // Fetch metadata via oEmbed
+    let [title, author] = ['', ''];
+    try {
+      const oembedRes = await fetch(
+        `https://www.youtube.com/oembed?url=${encodeURIComponent(ytUrl)}&format=json`
+      );
+      if (oembedRes.ok) {
+        const info = await oembedRes.json();
+        title = info.title || '';
+        author = info.author_name || '';
+      }
+    } catch (_) {}
+
+    return jsonResponse({
+      success: true,
+      transcript,
+      videoId,
+      title,
+      author,
+      error: null,
+    });
+
   } catch (err) {
-    const msg = err.message || '';
-    if (msg === 'CAPTIONS_DISABLED') {
-      errorMsg = 'Transcripts are disabled for this video.';
-    } else if (msg === 'VIDEO_UNAVAILABLE') {
-      errorMsg = 'This video is unavailable or does not exist.';
-    } else if (msg === 'CAPTIONS_NOT_AVAILABLE' || msg === 'CAPTIONS_EMPTY') {
-      errorMsg = 'No captions/transcript available for this video.';
-    } else if (msg.includes('429')) {
-      errorMsg = 'YouTube is rate-limiting requests. Please try again in a moment.';
-    } else {
-      errorMsg = 'Could not extract transcript. Please try again.';
-    }
+    return jsonResponse({
+      success: false,
+      transcript: [],
+      videoId,
+      title: '',
+      author: '',
+      error: err.message || 'Could not extract transcript. Please try again.',
+    });
   }
-
-  return jsonResponse({
-    success: !!transcript,
-    transcript: transcript || [],
-    videoId,
-    title,
-    author,
-    error: transcript ? null : errorMsg,
-  });
-}
-
-async function fetchTranscriptDirect(videoId) {
-  const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-
-  // Step 1: Fetch YouTube video page
-  const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-    headers: {
-      'User-Agent': ua,
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept': 'text/html,application/xhtml+xml',
-    },
-  });
-
-  if (!pageRes.ok) {
-    throw new Error(`YouTube page returned ${pageRes.status}`);
-  }
-
-  const html = await pageRes.text();
-
-  // Step 2: Extract captions from playerResponse
-  const captionsMatch = html.match(
-    /"captions":\s*(\{.*?"playerCaptionsTracklistRenderer".*?\})\s*,\s*"videoDetails"/s
-  );
-
-  if (!captionsMatch) {
-    if (html.includes('"playabilityStatus"') && html.includes('"reason"')) {
-      throw new Error('VIDEO_UNAVAILABLE');
-    }
-    throw new Error('CAPTIONS_NOT_AVAILABLE');
-  }
-
-  let captionsData;
-  try {
-    captionsData = JSON.parse(captionsMatch[1]);
-  } catch {
-    throw new Error('CAPTIONS_PARSE_ERROR');
-  }
-
-  const tracks = captionsData?.playerCaptionsTracklistRenderer?.captionTracks;
-  if (!tracks || tracks.length === 0) {
-    throw new Error('CAPTIONS_DISABLED');
-  }
-
-  // Step 3: Pick best English track
-  let track = tracks.find(t => t.languageCode === 'en' && t.kind !== 'asr');
-  if (!track) track = tracks.find(t => t.languageCode === 'en');
-  if (!track) track = tracks.find(t => t.languageCode?.startsWith('en'));
-  if (!track) track = tracks[0];
-
-  // Step 4: Fetch transcript JSON from timedtext CDN
-  const captionRes = await fetch(track.baseUrl + '&fmt=json3', {
-    headers: { 'User-Agent': ua },
-  });
-
-  if (!captionRes.ok) {
-    throw new Error(`Caption fetch returned ${captionRes.status}`);
-  }
-
-  const captionData = await captionRes.json();
-  const events = captionData?.events;
-  if (!events || events.length === 0) {
-    throw new Error('CAPTIONS_EMPTY');
-  }
-
-  // Step 5: Parse into standard format
-  const transcript = events
-    .filter(e => e.segs && e.segs.length > 0)
-    .map(e => ({
-      text: e.segs.map(s => s.utf8).join('').trim(),
-      offset: e.tStartMs || 0,
-      duration: e.dDurationMs || 0,
-      lang: track.languageCode,
-    }))
-    .filter(t => t.text.length > 0);
-
-  if (transcript.length === 0) {
-    throw new Error('CAPTIONS_EMPTY');
-  }
-
-  return transcript;
 }
 
 function extractVideoId(url) {
@@ -191,3 +143,4 @@ function jsonResponse(data, status = 200) {
     headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
   });
 }
+
