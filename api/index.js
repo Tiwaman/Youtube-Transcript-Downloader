@@ -6,23 +6,92 @@ const { getSubtitles } = require('youtube-captions-scraper');
 
 const app = express();
 
-const HEADER_POOL = [
-  {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': 'https://www.youtube.com/'
-  },
-  {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    'Accept-Language': 'en-GB,en;q=0.8',
-    'Referer': 'https://www.google.com/'
-  },
-  {
-    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': 'https://www.youtube.com/'
-  }
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 ];
+
+/* ── Direct page-scrape transcript fetcher (best for Vercel) ── */
+async function fetchTranscriptDirect(videoId) {
+  const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+
+  // Step 1: Fetch the YouTube video page
+  const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+    headers: {
+      'User-Agent': ua,
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml',
+    }
+  });
+
+  if (!pageRes.ok) {
+    throw new Error(`YouTube page returned ${pageRes.status}`);
+  }
+
+  const html = await pageRes.text();
+
+  // Step 2: Extract captions data from the page
+  const captionsMatch = html.match(/"captions":\s*(\{.*?"playerCaptionsTracklistRenderer".*?\})\s*,\s*"videoDetails"/s);
+  if (!captionsMatch) {
+    // Check if captions are disabled
+    if (html.includes('"playabilityStatus"') && html.includes('"reason"')) {
+      throw new Error('VIDEO_UNAVAILABLE');
+    }
+    throw new Error('CAPTIONS_NOT_AVAILABLE');
+  }
+
+  let captionsData;
+  try {
+    captionsData = JSON.parse(captionsMatch[1]);
+  } catch {
+    throw new Error('CAPTIONS_PARSE_ERROR');
+  }
+
+  const tracks = captionsData?.playerCaptionsTracklistRenderer?.captionTracks;
+  if (!tracks || tracks.length === 0) {
+    throw new Error('CAPTIONS_DISABLED');
+  }
+
+  // Step 3: Find the best English track (prefer manual over auto-generated)
+  let track = tracks.find(t => t.languageCode === 'en' && t.kind !== 'asr');
+  if (!track) track = tracks.find(t => t.languageCode === 'en');
+  if (!track) track = tracks.find(t => t.languageCode?.startsWith('en'));
+  if (!track) track = tracks[0]; // fallback to first available
+
+  // Step 4: Fetch the transcript XML from YouTube's timedtext CDN
+  const captionUrl = track.baseUrl + '&fmt=json3';
+  const captionRes = await fetch(captionUrl, {
+    headers: { 'User-Agent': ua }
+  });
+
+  if (!captionRes.ok) {
+    throw new Error(`Caption fetch returned ${captionRes.status}`);
+  }
+
+  const captionData = await captionRes.json();
+  const events = captionData?.events;
+  if (!events || events.length === 0) {
+    throw new Error('CAPTIONS_EMPTY');
+  }
+
+  // Step 5: Parse into our standard format
+  const transcript = events
+    .filter(e => e.segs && e.segs.length > 0)
+    .map(e => ({
+      text: e.segs.map(s => s.utf8).join('').trim(),
+      offset: e.tStartMs || 0,
+      duration: e.dDurationMs || 0,
+      lang: track.languageCode
+    }))
+    .filter(t => t.text.length > 0);
+
+  if (transcript.length === 0) {
+    throw new Error('CAPTIONS_EMPTY');
+  }
+
+  return transcript;
+}
 
 /* ── Transcript API ─────────────────────────────────────── */
 app.get('/api/transcript', async (req, res) => {
@@ -33,9 +102,7 @@ app.get('/api/transcript', async (req, res) => {
     const videoId = extractVideoId(url);
     if (!videoId) return res.status(400).json({ success: false, error: 'Invalid YouTube URL. Please paste a valid YouTube link or video ID.' });
 
-    const headers = HEADER_POOL[Math.floor(Math.random() * HEADER_POOL.length)];
-    
-    // 1. Fetch Metadata first to ensure UI has something to show
+    // 1. Fetch Metadata
     let [title, author] = ['Untitled Video', 'Unknown Channel'];
     try {
       const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
@@ -48,48 +115,55 @@ app.get('/api/transcript', async (req, res) => {
       console.error('Metadata fetch error:', err.message);
     }
 
-    // 2. Try fetching transcript (Method 1) with language fallbacks
+    // 2. Try fetching transcript — 3 methods with fallbacks
     let transcript = null;
     let errorMsg = '';
-    const langs = ['en', 'en-US', 'en-GB'];
 
+    // Method 1: Direct page scrape (most reliable on Vercel)
     try {
-      console.log(`[Method 1] Fetching transcript for ${videoId}`);
-      transcript = await YoutubeTranscript.fetchTranscript(videoId, {
-        lang: 'en'
-      });
+      console.log(`[Method 1 - Direct] Fetching ${videoId}`);
+      transcript = await fetchTranscriptDirect(videoId);
     } catch (err1) {
-      console.warn(`[Method 1] Failed: ${err1.message}`);
+      console.warn(`[Method 1 - Direct] Failed: ${err1.message}`);
 
-      // 3. Fallback (Method 2) — try multiple languages
-      for (const lang of langs) {
-        try {
-          console.log(`[Method 2] Trying lang=${lang} for ${videoId}`);
-          const subs = await getSubtitles({ videoID: videoId, lang });
-          if (subs && subs.length > 0) {
-            transcript = subs.map(t => ({
-              text: t.text,
-              offset: parseFloat(t.start) * 1000,
-              duration: parseFloat(t.dur) * 1000
-            }));
-            break;
+      // Method 2: youtube-transcript library
+      try {
+        console.log(`[Method 2 - Library] Fetching ${videoId}`);
+        transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
+      } catch (err2) {
+        console.warn(`[Method 2 - Library] Failed: ${err2.message}`);
+
+        // Method 3: youtube-captions-scraper fallback
+        const langs = ['en', 'en-US', 'en-GB'];
+        for (const lang of langs) {
+          try {
+            console.log(`[Method 3 - Scraper] Trying lang=${lang} for ${videoId}`);
+            const subs = await getSubtitles({ videoID: videoId, lang });
+            if (subs && subs.length > 0) {
+              transcript = subs.map(t => ({
+                text: t.text,
+                offset: parseFloat(t.start) * 1000,
+                duration: parseFloat(t.dur) * 1000
+              }));
+              break;
+            }
+          } catch (err3) {
+            console.warn(`[Method 3 - Scraper] lang=${lang} failed: ${err3.message}`);
           }
-        } catch (err2) {
-          console.warn(`[Method 2] lang=${lang} failed: ${err2.message}`);
         }
       }
 
+      // Determine error from Method 1's error (most informative)
       if (!transcript) {
-        // Determine error type from the original error
         const msg = err1.message || '';
-        if (msg.includes('disabled') || msg.includes('Disabled')) {
+        if (msg === 'CAPTIONS_DISABLED') {
           errorMsg = 'Transcripts are disabled for this video.';
-        } else if (msg.includes('unavailable') || msg.includes('Unavailable')) {
+        } else if (msg === 'VIDEO_UNAVAILABLE') {
           errorMsg = 'This video is unavailable or does not exist.';
-        } else if (msg.includes('Too many') || msg.includes('too many') || msg.includes('429')) {
-          errorMsg = 'YouTube is rate-limiting requests from this server. Please try again later or run the app locally.';
-        } else if (msg.includes('not available') || msg.includes('Not Available')) {
-          errorMsg = 'No transcript/captions available for this video.';
+        } else if (msg === 'CAPTIONS_NOT_AVAILABLE' || msg === 'CAPTIONS_EMPTY') {
+          errorMsg = 'No captions/transcript available for this video.';
+        } else if (msg.includes('429') || msg.includes('Too many')) {
+          errorMsg = 'YouTube is rate-limiting requests. Please try again later or run the app locally.';
         } else {
           errorMsg = 'Could not extract transcript. YouTube may be blocking this server — try running the app locally.';
         }
