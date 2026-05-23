@@ -57,7 +57,7 @@
   const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   const API_BASE = isLocal
     ? ''  // use local server
-    : 'https://transcriptgrab-api.YOUR_SUBDOMAIN.workers.dev';  // ← replace after deploy
+    : 'https://youtubetranscriptdownloader.gyanpur3.workers.dev';
 
   /* ── Fetch ─────────────────────────────────────────────── */
   async function handleFetch() {
