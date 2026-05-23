@@ -53,6 +53,13 @@
   });
 
   /* ── Fetch ─────────────────────────────────────────────── */
+  /* ── API endpoint config ────────────────────────────────── */
+  const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  const API_BASE = isLocal
+    ? ''  // use local server
+    : 'https://transcriptgrab-api.YOUR_SUBDOMAIN.workers.dev';  // ← replace after deploy
+
+  /* ── Fetch ─────────────────────────────────────────────── */
   async function handleFetch() {
     const url = urlInput.value.trim();
     if (!url) { showError('Please paste a YouTube URL.'); urlInput.focus(); return; }
@@ -62,7 +69,7 @@
     setLoading(true);
 
     try {
-      const res = await fetch(`/api/transcript?url=${encodeURIComponent(url)}`);
+      const res = await fetch(`${API_BASE}/api/transcript?url=${encodeURIComponent(url)}`);
       
       const contentType = res.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
