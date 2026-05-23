@@ -1,5 +1,5 @@
 import express from 'express';
-import { YoutubeTranscript } from './node_modules/youtube-transcript/dist/youtube-transcript.esm.js';
+import { YoutubeTranscript } from 'youtube-transcript';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
